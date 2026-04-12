@@ -245,12 +245,13 @@ class TimeGradEstimator(PyTorchEstimator):
         input_names = get_module_forward_input_names(prediction_network)
         prediction_splitter = self.create_instance_splitter("test")
 
+        # Use str so GluonTS serde can serialize the predictor (torch.device is not encodable).
+        dev = device if isinstance(device, str) else str(device)
         return PyTorchPredictor(
             input_transform=transformation + prediction_splitter,
             input_names=input_names,
             prediction_net=prediction_network,
             batch_size=self.trainer.batch_size,
-            freq=self.freq,
             prediction_length=self.prediction_length,
-            device=device,
+            device=dev,
         )

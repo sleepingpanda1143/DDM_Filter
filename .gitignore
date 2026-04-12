@@ -1,1 +1,66 @@
+# --- OS / editor ---
 .DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.code-workspace
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+.env
+.env.*
+.python-version
+
+# --- Jupyter / tooling ---
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.cover
+.hypothesis/
+wandb/
+
+# --- DDM: large experiment artifacts (retrain / re-viz to regenerate) ---
+dataset/**/*.npz
+dataset/**/prediction-net-state.pt
+dataset/**/*.ckpt
+
+# Generated figures (viz_report.txt 等小文件仍会提交，需要可取消下面三行)
+dataset/**/plots/*.png
+dataset/**/plots/*.pdf
+dataset/**/plots/*.svg
+
+# Run logs
+dataset/**/*.log
+dataset/radar_compare_parallel_logs/
+
+# 若希望整个 dataset/ 都不进仓库（含 metrics.json、preprocess_metadata.json），改为取消注释下一行：
+# dataset/

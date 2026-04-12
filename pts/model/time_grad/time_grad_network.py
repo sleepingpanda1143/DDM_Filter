@@ -3,9 +3,10 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 from gluonts.core.component import validated
+from gluonts.torch.scaler import MeanScaler, NOPScaler
 
 from pts.model import weighted_average
-from pts.modules import DiffusionOutput, GaussianDiffusion, MeanScaler, NOPScaler
+from pts.modules import DiffusionOutput, GaussianDiffusion
 
 from .epsilon_theta import EpsilonTheta
 
@@ -60,7 +61,7 @@ class TimeGradTrainingNetwork(nn.Module):
 
         self.denoise_fn = EpsilonTheta(
             target_dim=target_dim,
-            cond_length=conditioning_length,
+            cond_dim=conditioning_length,
             residual_layers=residual_layers,
             residual_channels=residual_channels,
             dilation_cycle_length=dilation_cycle_length,
@@ -86,10 +87,11 @@ class TimeGradTrainingNetwork(nn.Module):
             num_embeddings=self.target_dim, embedding_dim=self.embed_dim
         )
 
+        # NTC layout (batch, time, target_dim): scale along time (dim=1), same as TimeGradModel in module.py
         if self.scaling:
-            self.scaler = MeanScaler(keepdim=True)
+            self.scaler = MeanScaler(dim=1, keepdim=True)
         else:
-            self.scaler = NOPScaler(keepdim=True)
+            self.scaler = NOPScaler(dim=1, keepdim=True)
 
     @staticmethod
     def get_lagged_subsequences(
@@ -274,8 +276,8 @@ class TimeGradTrainingNetwork(nn.Module):
         )
 
         # scale is computed on the context length last units of the past target
-        # scale shape is (batch_size, 1, target_dim)
-        _, scale = self.scaler(
+        # MeanScaler returns (scaled_data, loc, scale)
+        _, _, scale = self.scaler(
             past_target_cdf[:, -self.context_length :, ...],
             past_observed_values[:, -self.context_length :, ...],
         )

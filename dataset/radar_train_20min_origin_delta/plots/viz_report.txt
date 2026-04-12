@@ -1,0 +1,12 @@
+Run: /home/xiongmaoren/kalman_net/DDM_Timeseries_Forecast/dataset/radar_train_20min_origin_delta
+prediction_length=1, context_length=20, denorm_metrics=True, state_repr=delta
+
+CV baseline position error stats (m):
+  mean |err| = 2.3307
+  std  |err| = 3.0119
+
+From metrics.json (if present):
+  ADE=8.85229206085205, CV_ADE=2.3307266235351562, ratio=3.7980825256225184
+
+Saved: /home/xiongmaoren/kalman_net/DDM_Timeseries_Forecast/dataset/radar_train_20min_origin_delta/plots/viz_gt_cv_coverage.png
+Saved: /home/xiongmaoren/kalman_net/DDM_Timeseries_Forecast/dataset/radar_train_20min_origin_delta/plots/viz_model_vs_gt.png

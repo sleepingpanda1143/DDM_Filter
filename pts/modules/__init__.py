@@ -14,3 +14,4 @@ from .distribution_output import (
     FlowOutput,
     DiffusionOutput,
 )
+from .gaussian_diffusion import GaussianDiffusion

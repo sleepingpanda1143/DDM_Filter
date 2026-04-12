@@ -1,0 +1,13 @@
+Run: /home/xiongmaoren/kalman_net/DDM_Timeseries_Forecast/dataset/radar_compare_runs_gpu0/02_long_train_double_scale
+prediction_length=1, context_length=20, denorm_metrics=True, state_repr=absolute
+
+CV baseline position error stats (m):
+  mean |err| = 2.5136
+  std  |err| = 3.7582
+
+From metrics.json (if present):
+  ADE=2329.089111328125, CV_ADE=2.5136497020721436, ratio=926.576646462761
+
+Saved: /home/xiongmaoren/kalman_net/DDM_Timeseries_Forecast/dataset/radar_compare_runs_gpu0/02_long_train_double_scale/plots/viz_gt_cv_coverage.png
+Model sample figure skipped (no forecast_samples.npz).
+Re-run training once with:  --save-forecast-samples

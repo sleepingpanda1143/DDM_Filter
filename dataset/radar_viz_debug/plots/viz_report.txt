@@ -1,0 +1,12 @@
+Run: /home/xiongmaoren/kalman_net/DDM_Timeseries_Forecast/dataset/radar_viz_debug
+prediction_length=1, context_length=20, denorm_metrics=True, state_repr=absolute
+
+CV baseline position error stats (m):
+  mean |err| = 1.9712
+  std  |err| = 2.6940
+
+From metrics.json (if present):
+  ADE=29009.693359375, CV_ADE=1.9712051153182983, ratio=14716.729950597095
+
+Saved: /home/xiongmaoren/kalman_net/DDM_Timeseries_Forecast/dataset/radar_viz_debug/plots/viz_gt_cv_coverage.png
+Saved: /home/xiongmaoren/kalman_net/DDM_Timeseries_Forecast/dataset/radar_viz_debug/plots/viz_model_vs_gt.png

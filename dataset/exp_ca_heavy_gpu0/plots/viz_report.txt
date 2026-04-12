@@ -1,0 +1,14 @@
+Run: /home/xiongmaoren/kalman_net/DDM_Timeseries_Forecast/dataset/exp_ca_heavy_gpu0
+prediction_length=1, context_length=20, denorm_metrics=True, state_repr=delta
+
+CV baseline position error stats (m):
+  mean |err| = 2.0389
+  std  |err| = 0.8397
+
+From metrics.json (if present):
+  ADE=3.882566452026367, CV_ADE=2.038883686065674, ratio=1.9042608847973819
+
+Saved: /home/xiongmaoren/kalman_net/DDM_Timeseries_Forecast/dataset/exp_ca_heavy_gpu0/plots/viz_gt_cv_coverage.png
+Saved: /home/xiongmaoren/kalman_net/DDM_Timeseries_Forecast/dataset/exp_ca_heavy_gpu0/plots/viz_model_vs_gt.png
+Saved: /home/xiongmaoren/kalman_net/DDM_Timeseries_Forecast/dataset/exp_ca_heavy_gpu0/plots/viz_last_step_zoom.png
+Saved: /home/xiongmaoren/kalman_net/DDM_Timeseries_Forecast/dataset/exp_ca_heavy_gpu0/plots/viz_full_and_zoom.png

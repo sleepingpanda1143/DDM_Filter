@@ -25,7 +25,18 @@ from gluonts.torch.modules.feature import FeatureEmbedder
 from gluonts.torch.scaler import MeanScaler, NOPScaler, Scaler, StdScaler
 from gluonts.torch.util import repeat_along_dim, unsqueeze_expand
 from diffusers import SchedulerMixin
-from diffusers.utils import randn_tensor
+
+try:
+    from diffusers.utils import randn_tensor
+except ImportError:
+    try:
+        from diffusers.utils.torch_utils import randn_tensor
+    except ImportError:
+
+        def randn_tensor(shape, generator=None, device=None, dtype=None, layout=None):
+            return torch.randn(
+                shape, generator=generator, device=device, dtype=dtype, layout=layout
+            )
 
 from pts.util import lagged_sequence_values
 
