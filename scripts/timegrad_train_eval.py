@@ -6,13 +6,19 @@ pre-built dataset folders that contain ``preprocess_metadata.json`` (radar / mot
 Example:
   ./scripts/run_timegrad.sh smoke
   ./scripts/run_timegrad.sh train --preset radar_viz_debug --max-epochs 20
+  TIMEGRAD_CUDA_DEVICE=0 ./scripts/run_timegrad.sh train ...   # 仅用物理 GPU 0
+
+After ``train`` / ``smoke``, for ``target_dim >= 2`` saves ``position_step_eval.png`` (planar ADE/FDE
+histograms + velocity + numeric summary) next to ``summary.json``. Use ``--no-eval-plots`` to skip.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -87,34 +93,6 @@ def _build_list_dataset(
     return ListDataset(entries, freq=freq, one_dim_target=(int(meta["target_dim"]) == 1))
 
 
-def _denorm_rmse(
-    forecasts: List[Any],
-    tss: List[pd.DataFrame],
-    mean: np.ndarray,
-    std: np.ndarray,
-    prediction_length: int,
-) -> Optional[float]:
-    """Mean RMSE over series after denormalizing with dataset mean/std (median forecast)."""
-    if mean is None or std is None:
-        return None
-    mean = np.asarray(mean, dtype=np.float64).reshape(-1)
-    std = np.asarray(std, dtype=np.float64).reshape(-1)
-    errs = []
-    for fc, ts in zip(forecasts, tss):
-        pred = fc.quantile(0.5)
-        pred = np.asarray(pred, dtype=np.float64)
-        obs = np.asarray(ts.to_numpy(copy=False), dtype=np.float64)
-        obs = obs[-prediction_length:]
-        if pred.ndim == 1:
-            pred = pred.reshape(-1, 1)
-        if obs.ndim == 1:
-            obs = obs.reshape(-1, 1)
-        p = pred * std + mean
-        o = obs * std + mean
-        errs.append(np.sqrt(np.mean((p - o) ** 2)))
-    return float(np.mean(errs)) if errs else None
-
-
 def _metrics_for_json(agg_metrics: Dict[str, Any]) -> Dict[str, float]:
     out: Dict[str, float] = {}
     for k, v in agg_metrics.items():
@@ -125,6 +103,219 @@ def _metrics_for_json(agg_metrics: Dict[str, Any]) -> Dict[str, float]:
         if np.isfinite(fv):
             out[k] = fv
     return out
+
+
+def _collect_aligned_pred_obs(
+    forecasts: List[Any],
+    tss: List[pd.DataFrame],
+    prediction_length: int,
+    mean: Optional[np.ndarray],
+    std: Optional[np.ndarray],
+    *,
+    use_global_affine: bool,
+) -> List[tuple[np.ndarray, np.ndarray]]:
+    """Median forecast vs ground truth, same units as ListDataset (``(T_pred, D)``)."""
+    if use_global_affine and (mean is None or std is None):
+        return []
+    mean_a = np.asarray(mean, dtype=np.float64).reshape(-1) if mean is not None else None
+    std_a = np.asarray(std, dtype=np.float64).reshape(-1) if std is not None else None
+    pairs: List[tuple[np.ndarray, np.ndarray]] = []
+    for fc, ts in zip(forecasts, tss):
+        pred = np.asarray(fc.quantile(0.5), dtype=np.float64)
+        obs = np.asarray(ts.to_numpy(copy=False), dtype=np.float64)
+        obs = obs[-prediction_length:]
+        if pred.ndim == 1:
+            pred = pred.reshape(-1, 1)
+        if obs.ndim == 1:
+            obs = obs.reshape(-1, 1)
+        if pred.shape != obs.shape:
+            raise ValueError(
+                f"Forecast shape {pred.shape} != observation shape {obs.shape} "
+                f"(check multivariate layout / prediction_length)."
+            )
+        if use_global_affine and mean_a is not None and std_a is not None:
+            p = pred * std_a + mean_a
+            o = obs * std_a + mean_a
+        else:
+            p, o = pred, obs
+        pairs.append((p, o))
+    return pairs
+
+
+def _position_velocity_eval(
+    pairs: List[tuple[np.ndarray, np.ndarray]],
+    target_dim: int,
+) -> tuple[Dict[str, float], Dict[str, np.ndarray]]:
+    """
+    Radar-style **planar position** error (dims 0,1 = x,y in m) and optional velocity (2:4).
+
+    ADE: mean over forecast horizon of ||pred_xy - gt_xy||_2 per series; report mean/median across series.
+    FDE: same norm at last forecast step (equals ADE when prediction_length is 1).
+    """
+    if target_dim < 2:
+        return {}, {}
+
+    ades: List[float] = []
+    fdes: List[float] = []
+    vel_scalars: List[float] = []
+    all_ex: List[float] = []
+    all_ey: List[float] = []
+
+    for p, o in pairs:
+        ex = (p[:, 0] - o[:, 0]).ravel()
+        ey = (p[:, 1] - o[:, 1]).ravel()
+        all_ex.extend(ex.tolist())
+        all_ey.extend(ey.tolist())
+        epos = np.sqrt((p[:, 0] - o[:, 0]) ** 2 + (p[:, 1] - o[:, 1]) ** 2)
+        ades.append(float(np.mean(epos)))
+        fdes.append(float(epos[-1]))
+        if target_dim >= 4:
+            vel_scalars.append(
+                float(np.sqrt(np.mean((p[:, 2:4] - o[:, 2:4]) ** 2)))
+            )
+
+    ex_arr = np.asarray(all_ex, dtype=np.float64)
+    ey_arr = np.asarray(all_ey, dtype=np.float64)
+    stats: Dict[str, float] = {
+        "ade_xy_mean_m": float(np.mean(ades)),
+        "ade_xy_median_m": float(np.median(ades)),
+        "fde_xy_mean_m": float(np.mean(fdes)),
+        "fde_xy_median_m": float(np.median(fdes)),
+        "rmse_x_m": float(np.sqrt(np.mean(ex_arr**2))),
+        "rmse_y_m": float(np.sqrt(np.mean(ey_arr**2))),
+    }
+    if vel_scalars:
+        stats["rmse_vel_plane_ms"] = float(np.mean(vel_scalars))
+        stats["rmse_vel_plane_median_ms"] = float(np.median(vel_scalars))
+
+    arrays = {
+        "per_series_ade_m": np.asarray(ades, dtype=np.float64),
+        "per_series_fde_m": np.asarray(fdes, dtype=np.float64),
+        "per_series_vel_rmse_ms": np.asarray(vel_scalars, dtype=np.float64) if vel_scalars else np.array([]),
+    }
+    return stats, arrays
+
+
+def _save_position_eval_figure(
+    out_dir: Path,
+    stats: Dict[str, float],
+    arrays: Dict[str, np.ndarray],
+    preset_name: str,
+) -> Path:
+    """2×2 figure similar in spirit to Radar ``error_comparison`` / PF example plots."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle(
+        f"TimeGrad median forecast — planar position & velocity ({preset_name})",
+        fontsize=13,
+    )
+
+    ades = arrays.get("per_series_ade_m", np.array([]))
+    ax0 = axes[0, 0]
+    if ades.size:
+        ax0.hist(ades, bins=min(40, max(10, len(ades) // 3)), color="steelblue", edgecolor="white", alpha=0.9)
+        ax0.axvline(
+            stats.get("ade_xy_median_m", float("nan")),
+            color="crimson",
+            linestyle="--",
+            linewidth=2,
+            label=f"median ADE_xy = {stats.get('ade_xy_median_m', float('nan')):.2f} m",
+        )
+        ax0.axvline(
+            stats.get("ade_xy_mean_m", float("nan")),
+            color="darkorange",
+            linestyle=":",
+            linewidth=2,
+            label=f"mean ADE_xy = {stats.get('ade_xy_mean_m', float('nan')):.2f} m",
+        )
+    ax0.set_xlabel("ADE_xy per series (m)")
+    ax0.set_ylabel("Count")
+    ax0.set_title("Distribution of mean planar position error over forecast horizon")
+    ax0.legend(loc="upper right", fontsize=9)
+    ax0.grid(True, alpha=0.3)
+
+    ax1 = axes[0, 1]
+    fdes = arrays.get("per_series_fde_m", np.array([]))
+    if fdes.size:
+        ax1.hist(fdes, bins=min(40, max(10, len(fdes) // 3)), color="seagreen", edgecolor="white", alpha=0.9)
+        ax1.axvline(
+            stats.get("fde_xy_median_m", float("nan")),
+            color="crimson",
+            linestyle="--",
+            linewidth=2,
+            label=f"median FDE_xy = {stats.get('fde_xy_median_m', float('nan')):.2f} m",
+        )
+        ax1.axvline(
+            stats.get("fde_xy_mean_m", float("nan")),
+            color="darkorange",
+            linestyle=":",
+            linewidth=2,
+            label=f"mean FDE_xy = {stats.get('fde_xy_mean_m', float('nan')):.2f} m",
+        )
+    ax1.set_xlabel("FDE_xy per series (m)")
+    ax1.set_ylabel("Count")
+    ax1.set_title("Final-step planar error (same as ADE when horizon is 1)")
+    ax1.legend(loc="upper right", fontsize=9)
+    ax1.grid(True, alpha=0.3)
+
+    ax2 = axes[1, 0]
+    vels = arrays.get("per_series_vel_rmse_ms", np.array([]))
+    if vels.size:
+        ax2.hist(vels, bins=min(40, max(10, len(vels) // 3)), color="mediumpurple", edgecolor="white", alpha=0.9)
+        ax2.axvline(
+            stats.get("rmse_vel_plane_median_ms", float("nan")),
+            color="crimson",
+            linestyle="--",
+            linewidth=2,
+            label=f"median RMSE_v = {stats.get('rmse_vel_plane_median_ms', float('nan')):.3f} m/s",
+        )
+        ax2.axvline(
+            stats.get("rmse_vel_plane_ms", float("nan")),
+            color="darkorange",
+            linestyle=":",
+            linewidth=2,
+            label=f"mean RMSE_v = {stats.get('rmse_vel_plane_ms', float('nan')):.3f} m/s",
+        )
+        ax2.set_xlabel("Per-series RMSE of (vx, vy) over horizon (m/s)")
+        ax2.set_ylabel("Count")
+        ax2.set_title("Velocity error (channels 2–3)")
+        ax2.legend(loc="upper right", fontsize=9)
+        ax2.grid(True, alpha=0.3)
+    else:
+        ax2.text(0.5, 0.5, "target_dim < 4: no velocity channels", ha="center", va="center", transform=ax2.transAxes)
+        ax2.set_axis_off()
+
+    ax3 = axes[1, 1]
+    ax3.axis("off")
+    lines = [
+        "Pooled RMSE (all test points, horizon):",
+        f"  RMSE_x = {stats.get('rmse_x_m', float('nan')):.3f} m",
+        f"  RMSE_y = {stats.get('rmse_y_m', float('nan')):.3f} m",
+        "",
+        "Per-series aggregates:",
+        f"  ADE_xy mean / median = {stats.get('ade_xy_mean_m', float('nan')):.3f} / "
+        f"{stats.get('ade_xy_median_m', float('nan')):.3f} m",
+        f"  FDE_xy mean / median = {stats.get('fde_xy_mean_m', float('nan')):.3f} / "
+        f"{stats.get('fde_xy_median_m', float('nan')):.3f} m",
+    ]
+    if "rmse_vel_plane_ms" in stats:
+        lines.extend(
+            [
+                f"  RMSE (vx,vy) mean / median = {stats['rmse_vel_plane_ms']:.4f} / "
+                f"{stats.get('rmse_vel_plane_median_ms', float('nan')):.4f} m/s",
+            ]
+        )
+    ax3.text(0.05, 0.95, "\n".join(lines), transform=ax3.transAxes, fontsize=11, va="top", family="monospace")
+
+    out_path = out_dir / "position_step_eval.png"
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    return out_path
 
 
 def run_single(
@@ -224,7 +415,7 @@ def run_single(
         t0 = time.perf_counter()
         predictor = estimator.train(
             training_data=train_ds,
-            shuffle_buffer_length=max(100, args.batch_size * 4),
+            shuffle_buffer_length=max(512, int(args.batch_size) * 8),
         )
         train_seconds = time.perf_counter() - t0
 
@@ -242,18 +433,39 @@ def run_single(
 
         mean = meta.get("normalization_mean")
         std = meta.get("normalization_std")
+        # NPZ trajectories are usually **raw** units; global mean/std are for
+        # diagnostics or z-scored exports. Only apply inverse z-score when set.
+        use_affine = bool(meta.get("dataset_target_global_zscore", False))
+        pairs = _collect_aligned_pred_obs(
+            forecasts, tss, prediction_length, mean, std, use_global_affine=use_affine
+        )
         denorm = None
-        if meta.get("denorm_metrics") and mean is not None and std is not None:
-            denorm = _denorm_rmse(
-                forecasts, tss, mean, std, prediction_length=prediction_length
+        if meta.get("denorm_metrics") and pairs:
+            denorm = float(
+                np.mean([float(np.sqrt(np.mean((p - o) ** 2))) for p, o in pairs])
             )
 
         out_dir = Path(args.output_dir) if args.output_dir else dataset_dir / "timegrad_autoruns"
         out_dir = out_dir / f"{int(time.time())}_{args.encoder_type}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        position_metrics: Dict[str, float] = {}
+        position_eval_plot: Optional[str] = None
+        if (
+            target_dim >= 2
+            and pairs
+            and not getattr(args, "no_eval_plots", False)
+        ):
+            pos_stats, pos_arrays = _position_velocity_eval(pairs, target_dim)
+            position_metrics = pos_stats
+            plot_path = _save_position_eval_figure(
+                out_dir, pos_stats, pos_arrays, dataset_dir.name
+            )
+            position_eval_plot = str(plot_path)
+
         summary = {
             "dataset_dir": str(dataset_dir),
+            "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
             "encoder_type": args.encoder_type,
             "transformer_nhead": int(args.transformer_nhead),
             "hidden_size": hidden_size,
@@ -268,6 +480,9 @@ def run_single(
             "min_length_required": min_len,
             "agg_metrics": _metrics_for_json(agg_metrics),
             "denorm_median_rmse": denorm,
+            "dataset_target_global_zscore": use_affine,
+            "position_metrics": position_metrics,
+            "position_eval_plot": position_eval_plot,
         }
         with (out_dir / "summary.json").open("w") as f:
             json.dump(summary, f, indent=2)
@@ -316,17 +531,38 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--dropout-rate", type=float, default=0.1)
     parser.add_argument("--accelerator", choices=["auto", "gpu", "cpu"], default="auto")
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=128,
+        help="Training batch size (default 128 for better GPU util on large GPUs; use smaller if OOM).",
+    )
     parser.add_argument("--max-epochs", type=int, default=None)
     parser.add_argument("--num-batches-per-epoch", type=int, default=None)
     parser.add_argument("--num-parallel-samples", type=int, default=100)
     parser.add_argument("--num-inference-steps", type=int, default=50)
     parser.add_argument("--eval-num-samples", type=int, default=50)
+    parser.add_argument(
+        "--no-eval-plots",
+        action="store_true",
+        help="Skip saving position_step_eval.png (matplotlib) after training.",
+    )
 
     args = parser.parse_args()
 
+    # GluonTS 0.16 + PyTorch 2.x: repeat_along_dim uses list indexing; harmless but very noisy.
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Using a non-tuple sequence for multidimensional indexing is deprecated.*",
+        category=UserWarning,
+    )
+
     if args.accelerator == "auto":
         args.accelerator = "gpu" if torch.cuda.is_available() else "cpu"
+
+    if args.accelerator == "gpu" and torch.cuda.is_available():
+        # Better Tensor Core throughput on Ada/Blackwell (Lightning prints a hint otherwise).
+        torch.set_float32_matmul_precision("medium")
 
     if args.mode == "smoke":
         args.max_epochs = 2 if args.max_epochs is None else args.max_epochs
@@ -336,7 +572,7 @@ def main() -> None:
         args.eval_num_samples = min(int(args.eval_num_samples), 20)
     else:
         args.max_epochs = 15 if args.max_epochs is None else args.max_epochs
-        args.num_batches_per_epoch = 80 if args.num_batches_per_epoch is None else args.num_batches_per_epoch
+        args.num_batches_per_epoch = 100 if args.num_batches_per_epoch is None else args.num_batches_per_epoch
 
     presets = [args.preset] if args.preset else list(args.presets)
     rows = []
@@ -354,8 +590,21 @@ def main() -> None:
                 f"train_s={summary['train_seconds']:.1f}"
             )
             if summary.get("denorm_median_rmse") is not None:
-                line += f"  denorm_RMSE(median_fc)={summary['denorm_median_rmse']:.6g}"
+                tag = "median_RMSE(z->phys)" if summary.get("dataset_target_global_zscore") else "median_RMSE(target_units)"
+                line += f"  {tag}={summary['denorm_median_rmse']:.6g}"
+            pm = summary.get("position_metrics") or {}
+            if pm:
+                line += (
+                    f"  ADE_xy(median)={pm.get('ade_xy_median_m', float('nan')):.2f}m"
+                    f"  ADE_xy(mean)={pm.get('ade_xy_mean_m', float('nan')):.2f}m"
+                    f"  RMSE_x={pm.get('rmse_x_m', float('nan')):.2f}m"
+                    f"  RMSE_y={pm.get('rmse_y_m', float('nan')):.2f}m"
+                )
+                if "rmse_vel_plane_ms" in pm:
+                    line += f"  RMSE_vxy={pm['rmse_vel_plane_ms']:.3f}m/s"
             print(line, flush=True)
+            if summary.get("position_eval_plot"):
+                print(f"  position plot: {summary['position_eval_plot']}", flush=True)
         except Exception as e:
             print(f"FAILED {name}: {e}", flush=True)
             rows.append({"dataset_dir": str(dataset_dir), "error": str(e)})

@@ -110,7 +110,9 @@ class _TransformerPastEncoder(nn.Module):
             norm_first=True,
             activation="gelu",
         )
-        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
+        self.encoder = nn.TransformerEncoder(
+            enc_layer, num_layers=num_layers, enable_nested_tensor=False
+        )
 
     def forward(
         self,
