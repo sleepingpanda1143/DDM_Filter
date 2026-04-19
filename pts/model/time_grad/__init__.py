@@ -1,20 +1,7 @@
-try:
-    from .estimator import TimeGradEstimator
-except ImportError:
-    from .time_grad_estimator import TimeGradEstimator
+"""GluonTS-style TimeGrad (diffusers) bindings used by ``scripts/timegrad_train_eval.py``."""
 
-try:
-    from .module import TimeGradModel
-except ImportError:
-    TimeGradModel = None  # type: ignore[misc, assignment]
+from .estimator import TimeGradEstimator
+from .lightning_module import TimeGradLightningModule
+from .module import TimeGradModel
 
-try:
-    from .lightning_module import TimeGradLightningModule
-except ImportError:
-    TimeGradLightningModule = None  # type: ignore[misc, assignment]
-
-__all__ = ["TimeGradEstimator"]
-if TimeGradModel is not None:
-    __all__.append("TimeGradModel")
-if TimeGradLightningModule is not None:
-    __all__.append("TimeGradLightningModule")
+__all__ = ["TimeGradEstimator", "TimeGradLightningModule", "TimeGradModel"]

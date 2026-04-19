@@ -1,66 +1,28 @@
-# --- OS / editor ---
-.DS_Store
-Thumbs.db
-*.swp
-*.swo
-*~
-.idea/
-.vscode/
-*.code-workspace
-
-# --- Python ---
+# Python / tooling
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
+.pytest_cache/
+.ipynb_checkpoints/
 *.egg-info/
-.installed.cfg
-*.egg
 .venv/
 venv/
-ENV/
-.env
-.env.*
-.python-version
 
-# --- Jupyter / tooling ---
-.ipynb_checkpoints/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-htmlcov/
-.coverage
-coverage.xml
-*.cover
-.hypothesis/
-wandb/
+# Lightning / local training logs
+lightning_logs/
 
-# --- DDM: large experiment artifacts (retrain / re-viz to regenerate) ---
-dataset/**/*.npz
-dataset/**/prediction-net-state.pt
-dataset/**/*.ckpt
+# Regenerated at end of multi-preset runs
+dataset/_timegrad_last_run_summary.json
 
-# Generated figures (viz_report.txt 等小文件仍会提交，需要可取消下面三行)
-dataset/**/plots/*.png
-dataset/**/plots/*.pdf
-dataset/**/plots/*.svg
+# Heavy or reproducible artifacts under dataset presets (keep JSON/CSV preprocess in git if desired)
+dataset/**/predictor/
+dataset/**/timegrad_autoruns/
+dataset/**/timegrad_runs*/
+dataset/**/forecast_samples.npz
+dataset/**/train_test_trajectories.npz
 
-# Run logs
-dataset/**/*.log
+# Compare / sweep output trees (summaries are small; whole trees are reproducible)
+dataset/compare_delta_gpu*/
+dataset/exp_compare_gpu*/
+dataset/exp_ablate_2gpu/
 dataset/radar_compare_parallel_logs/
-
-# 若希望整个 dataset/ 都不进仓库（含 metrics.json、preprocess_metadata.json），改为取消注释下一行：
-# dataset/
+dataset/radar_compare_runs_gpu*/

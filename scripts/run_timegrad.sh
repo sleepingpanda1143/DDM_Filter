@@ -13,8 +13,13 @@
 #   TIMEGRAD_CUDA_DEVICE=0 ./scripts/run_timegrad.sh train ... --output-dir .../run_A
 #   TIMEGRAD_CUDA_DEVICE=1 ./scripts/run_timegrad.sh train ... --output-dir .../run_B
 #
-# 默认 train 的 --batch-size 为 128（可用更小值避免 OOM）；短序列 + 小模型时 GPU 利用率仍可能偏低，
-# 增大 batch 与 shuffle_buffer 可摊薄 kernel 启动与数据管道开销。
+# 归一化 A/B（GluonTS mean scaler vs JSON 每通道 z-score）可一键双卡:
+#   ./scripts/run_timegrad_norm_ablation_2gpu.sh
+#
+# 同一 GPU 上开两组实验: 只有显存够时才并行；否则减小每组 --batch-size 或串行跑两条命令。
+#
+# 默认 train：较大 --batch-size、可选 --accumulate-grad-batches、更长 epoch / 更高 lr 需自行传参；
+# 短序列 + 中小模型时 GPU 仍可能偏低，可再增大 hidden、ff、或 num-batches-per-epoch。
 #
 set -euo pipefail
 
