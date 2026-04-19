@@ -43,6 +43,98 @@ from pts.util import lagged_sequence_values
 from .epsilon_theta import EpsilonTheta
 
 
+class _LSTMPastEncoder(nn.Module):
+    """LSTM over lagged inputs; state is the real RNN carry."""
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        num_layers: int,
+        dropout_rate: float,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.core = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout_rate,
+            batch_first=True,
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        return self.core(x, state)
+
+
+class _TransformerPastEncoder(nn.Module):
+    """
+    Transformer encoder over the same lagged feature sequence as the LSTM path.
+    Outputs per-timestep vectors (``hidden_size``) for ``EpsilonTheta`` conditioning.
+    The returned state is a dummy ``(h, c)`` tuple of zeros so the autoregressive
+    sampling loop stays API-compatible with the LSTM implementation.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        num_layers: int,
+        nhead: int,
+        dropout_rate: float,
+        dim_feedforward: int,
+        max_seq_len: int,
+    ) -> None:
+        super().__init__()
+        if hidden_size % nhead != 0:
+            raise ValueError(
+                f"hidden_size ({hidden_size}) must be divisible by "
+                f"transformer_nhead ({nhead}) for nn.MultiheadAttention."
+            )
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.input_proj = nn.Linear(input_size, hidden_size)
+        self.pos_embed = nn.Parameter(torch.zeros(1, max_seq_len, hidden_size))
+        nn.init.normal_(self.pos_embed, std=0.02)
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_size,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout_rate,
+            batch_first=True,
+            norm_first=True,
+            activation="gelu",
+        )
+        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        del state  # autoregressive carry not used; history is in ``x`` each step
+        b, t, _ = x.shape
+        if t > self.pos_embed.shape[1]:
+            raise ValueError(
+                f"Sequence length {t} exceeds encoder max_seq_len={self.pos_embed.shape[1]}."
+            )
+        h = self.input_proj(x) + self.pos_embed[:, :t, :]
+        out = self.encoder(h)
+        z = torch.zeros(
+            self.num_layers,
+            b,
+            self.hidden_size,
+            device=x.device,
+            dtype=x.dtype,
+        )
+        return out, (z, z)
+
+
 class TimeGradModel(nn.Module):
     """
     Module implementing the TimeGrad model.
@@ -68,9 +160,16 @@ class TimeGradModel(nn.Module):
         Dimension of the embedding space, one for each static categorical
         feature.
     num_layers
-        Number of layers in the RNN.
+        Number of stacked LSTM layers, or Transformer encoder layers when
+        ``encoder_type="transformer"``.
     hidden_size
-        Size of the hidden layers in the RNN.
+        LSTM hidden size, or Transformer ``d_model`` / conditioner width for the denoiser.
+    encoder_type
+        ``"lstm"`` (default) or ``"transformer"`` for the lagged-history encoder.
+    transformer_nhead
+        Attention heads when ``encoder_type="transformer"``.
+    transformer_dim_feedforward
+        FFN width for Transformer layers; default ``4 * hidden_size``.
     dropout_rate
         Dropout rate to be applied at training time.
     lags_seq
@@ -111,6 +210,9 @@ class TimeGradModel(nn.Module):
         default_scale: float = 0.0,
         num_parallel_samples: int = 100,
         num_inference_steps: int = 100,
+        encoder_type: str = "lstm",
+        transformer_nhead: int = 4,
+        transformer_dim_feedforward: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -154,13 +256,33 @@ class TimeGradModel(nn.Module):
         self.rnn_input_size = (
             self.input_size * len(self.lags_seq) + self._number_of_features
         )
-        self.rnn = nn.LSTM(
-            input_size=self.rnn_input_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            dropout=dropout_rate,
-            batch_first=True,
-        )
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.encoder_type = encoder_type
+        max_seq_len = context_length + prediction_length + 128
+        if encoder_type == "lstm":
+            self.seq_encoder = _LSTMPastEncoder(
+                self.rnn_input_size, hidden_size, num_layers, dropout_rate
+            )
+        elif encoder_type == "transformer":
+            d_ff = (
+                transformer_dim_feedforward
+                if transformer_dim_feedforward is not None
+                else 4 * hidden_size
+            )
+            self.seq_encoder = _TransformerPastEncoder(
+                self.rnn_input_size,
+                hidden_size,
+                num_layers,
+                transformer_nhead,
+                dropout_rate,
+                d_ff,
+                max_seq_len,
+            )
+        else:
+            raise ValueError(
+                f"encoder_type must be 'lstm' or 'transformer', got {encoder_type!r}"
+            )
 
         self.unet = EpsilonTheta(target_dim=input_size, cond_dim=hidden_size)
         self.scheduler = scheduler
@@ -335,7 +457,7 @@ class TimeGradModel(nn.Module):
             future_target,
         )
 
-        output, new_state = self.rnn(rnn_input)
+        output, new_state = self.seq_encoder(rnn_input)
 
         return loc, scale, output, static_feat, new_state
 
@@ -424,7 +546,7 @@ class TimeGradModel(nn.Module):
             )
             rnn_input = torch.cat((next_lags, next_features), dim=-1)
 
-            output, repeated_state = self.rnn(rnn_input, repeated_state)
+            output, repeated_state = self.seq_encoder(rnn_input, repeated_state)
 
             repeated_past_target = torch.cat(
                 (repeated_past_target, scaled_next_sample), dim=1

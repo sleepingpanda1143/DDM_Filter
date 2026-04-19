@@ -43,8 +43,6 @@ from gluonts.transform import (
 from gluonts.transform.sampler import InstanceSampler
 from diffusers import SchedulerMixin
 
-from pts.modules import StudentTOutput
-
 from .lightning_module import TimeGradLightningModule
 
 PREDICTION_INPUT_NAMES = [
@@ -162,6 +160,9 @@ class TimeGradEstimator(PyTorchLightningEstimator):
         time_features: Optional[List[TimeFeature]] = None,
         num_parallel_samples: int = 100,
         num_inference_steps: int = 100,
+        encoder_type: str = "lstm",
+        transformer_nhead: int = 4,
+        transformer_dim_feedforward: Optional[int] = None,
         batch_size: int = 32,
         num_batches_per_epoch: int = 50,
         imputation_method: Optional[MissingValueImputation] = None,
@@ -179,6 +180,9 @@ class TimeGradEstimator(PyTorchLightningEstimator):
         self.input_size = input_size
         self.scheduler = scheduler
         self.num_inference_steps = num_inference_steps
+        self.encoder_type = encoder_type
+        self.transformer_nhead = transformer_nhead
+        self.transformer_dim_feedforward = transformer_dim_feedforward
         self.context_length = (
             context_length if context_length is not None else prediction_length
         )
@@ -384,6 +388,9 @@ class TimeGradEstimator(PyTorchLightningEstimator):
                 "scaling": self.scaling,
                 "default_scale": self.default_scale,
                 "num_parallel_samples": self.num_parallel_samples,
+                "encoder_type": self.encoder_type,
+                "transformer_nhead": self.transformer_nhead,
+                "transformer_dim_feedforward": self.transformer_dim_feedforward,
             },
         )
 

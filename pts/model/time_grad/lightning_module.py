@@ -11,7 +11,11 @@
 # express or implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-import pytorch_lightning as pl
+try:
+    import lightning.pytorch as pl
+except ImportError:  # pragma: no cover
+    import pytorch_lightning as pl
+
 import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
