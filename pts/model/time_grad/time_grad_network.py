@@ -36,6 +36,7 @@ class TimeGradTrainingNetwork(nn.Module):
         cardinality: List[int] = [1],
         embedding_dimension: int = 1,
         scaling: bool = True,
+        meas_feat_dim: int = 0,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -44,6 +45,9 @@ class TimeGradTrainingNetwork(nn.Module):
         self.context_length = context_length
         self.history_length = history_length
         self.scaling = scaling
+        # Kept for backward-compatible deserialization of predictors that
+        # persisted measurement-conditioning metadata.
+        self.meas_feat_dim = int(meas_feat_dim)
 
         assert len(set(lags_seq)) == len(lags_seq), "no duplicated lags allowed!"
         lags_seq.sort()
@@ -145,6 +149,7 @@ class TimeGradTrainingNetwork(nn.Module):
         target_dimension_indicator: torch.Tensor,
         unroll_length: int,
         begin_state: Optional[Union[List[torch.Tensor], torch.Tensor]] = None,
+        feat_dynamic: Optional[torch.Tensor] = None,
     ) -> Tuple[
         torch.Tensor,
         Union[List[torch.Tensor], torch.Tensor],
@@ -174,7 +179,10 @@ class TimeGradTrainingNetwork(nn.Module):
         )
 
         # (batch_size, sub_seq_len, input_dim)
-        inputs = torch.cat((input_lags, repeated_index_embeddings, time_feat), dim=-1)
+        parts = [input_lags, repeated_index_embeddings, time_feat]
+        if feat_dynamic is not None:
+            parts.append(feat_dynamic)
+        inputs = torch.cat(parts, dim=-1)
 
         # unroll encoder
         outputs, state = self.rnn(inputs, begin_state)
@@ -198,6 +206,8 @@ class TimeGradTrainingNetwork(nn.Module):
         future_time_feat: Optional[torch.Tensor],
         future_target_cdf: Optional[torch.Tensor],
         target_dimension_indicator: torch.Tensor,
+        past_feat_dynamic_real: Optional[torch.Tensor] = None,
+        future_feat_dynamic_real: Optional[torch.Tensor] = None,
     ) -> Tuple[
         torch.Tensor,
         Union[List[torch.Tensor], torch.Tensor],
@@ -282,6 +292,28 @@ class TimeGradTrainingNetwork(nn.Module):
             past_observed_values[:, -self.context_length :, ...],
         )
 
+        feat_dyn: Optional[torch.Tensor] = None
+        if self.meas_feat_dim > 0:
+            if past_feat_dynamic_real is None:
+                raise ValueError(
+                    "past_feat_dynamic_real is required when meas_feat_dim > 0"
+                )
+            if future_time_feat is None or future_target_cdf is None:
+                feat_dyn = past_feat_dynamic_real[:, -self.context_length :, :]
+            else:
+                if future_feat_dynamic_real is None:
+                    raise ValueError(
+                        "future_feat_dynamic_real is required in training encoder "
+                        "when meas_feat_dim > 0"
+                    )
+                feat_dyn = torch.cat(
+                    (
+                        past_feat_dynamic_real[:, -self.context_length :, :],
+                        future_feat_dynamic_real,
+                    ),
+                    dim=1,
+                )
+
         outputs, states, lags_scaled, inputs = self.unroll(
             lags=lags,
             scale=scale,
@@ -289,6 +321,7 @@ class TimeGradTrainingNetwork(nn.Module):
             target_dimension_indicator=target_dimension_indicator,
             unroll_length=subsequences_length,
             begin_state=None,
+            feat_dynamic=feat_dyn,
         )
 
         return outputs, states, scale, lags_scaled, inputs
@@ -432,7 +465,7 @@ class TimeGradTrainingNetwork(nn.Module):
 
 
 class TimeGradPredictionNetwork(TimeGradTrainingNetwork):
-    def __init__(self, num_parallel_samples: int, **kwargs) -> None:
+    def __init__(self, num_parallel_samples: int = 100, **kwargs) -> None:
         super().__init__(**kwargs)
         self.num_parallel_samples = num_parallel_samples
 
@@ -448,6 +481,7 @@ class TimeGradPredictionNetwork(TimeGradTrainingNetwork):
         time_feat: torch.Tensor,
         scale: torch.Tensor,
         begin_states: Union[List[torch.Tensor], torch.Tensor],
+        future_feat_dynamic_real: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Computes sample paths by unrolling the RNN starting with a initial
@@ -491,6 +525,15 @@ class TimeGradPredictionNetwork(TimeGradTrainingNetwork):
         else:
             repeated_states = repeat(begin_states, dim=1)
 
+        repeated_future_fd: Optional[torch.Tensor] = None
+        if self.meas_feat_dim > 0:
+            if future_feat_dynamic_real is None:
+                raise ValueError(
+                    "future_feat_dynamic_real is required in sampling_decoder when "
+                    "meas_feat_dim > 0"
+                )
+            repeated_future_fd = repeat(future_feat_dynamic_real)
+
         future_samples = []
 
         # for each future time-units we draw new samples for this time-unit
@@ -503,6 +546,11 @@ class TimeGradPredictionNetwork(TimeGradTrainingNetwork):
                 subsequences_length=1,
             )
 
+            fd_slice: Optional[torch.Tensor] = None
+            if self.meas_feat_dim > 0:
+                assert repeated_future_fd is not None
+                fd_slice = repeated_future_fd[:, k : k + 1, ...]
+
             rnn_outputs, repeated_states, _, _ = self.unroll(
                 begin_state=repeated_states,
                 lags=lags,
@@ -510,6 +558,7 @@ class TimeGradPredictionNetwork(TimeGradTrainingNetwork):
                 time_feat=repeated_time_feat[:, k : k + 1, ...],
                 target_dimension_indicator=repeated_target_dimension_indicator,
                 unroll_length=1,
+                feat_dynamic=fd_slice,
             )
 
             distr_args = self.distr_args(rnn_outputs=rnn_outputs)
@@ -598,4 +647,58 @@ class TimeGradPredictionNetwork(TimeGradTrainingNetwork):
             time_feat=future_time_feat,
             scale=scale,
             begin_states=begin_states,
+            future_feat_dynamic_real=None,
+        )
+
+
+class TimeGradMeasCondPredictionNetwork(TimeGradPredictionNetwork):
+
+    def __init__(
+        self,
+        meas_feat_dim: int,
+        num_parallel_samples: int = 100,
+        **kwargs,
+    ) -> None:
+        if meas_feat_dim <= 0:
+            raise ValueError("meas_feat_dim must be positive")
+        super().__init__(
+            num_parallel_samples=num_parallel_samples,
+            meas_feat_dim=meas_feat_dim,
+            **kwargs,
+        )
+
+    def forward(
+        self,
+        target_dimension_indicator: torch.Tensor,
+        past_time_feat: torch.Tensor,
+        past_target_cdf: torch.Tensor,
+        past_observed_values: torch.Tensor,
+        past_is_pad: torch.Tensor,
+        past_feat_dynamic_real: torch.Tensor,
+        future_time_feat: torch.Tensor,
+        future_feat_dynamic_real: torch.Tensor,
+    ) -> torch.Tensor:
+        past_observed_values = torch.min(
+            past_observed_values, 1 - past_is_pad.unsqueeze(-1)
+        )
+
+        _, begin_states, scale, _, _ = self.unroll_encoder(
+            target_dimension_indicator=target_dimension_indicator,
+            past_time_feat=past_time_feat,
+            past_target_cdf=past_target_cdf,
+            past_observed_values=past_observed_values,
+            past_is_pad=past_is_pad,
+            future_time_feat=None,
+            future_target_cdf=None,
+            past_feat_dynamic_real=past_feat_dynamic_real,
+            future_feat_dynamic_real=None,
+        )
+
+        return self.sampling_decoder(
+            past_target_cdf=past_target_cdf,
+            target_dimension_indicator=target_dimension_indicator,
+            time_feat=future_time_feat,
+            scale=scale,
+            begin_states=begin_states,
+            future_feat_dynamic_real=future_feat_dynamic_real,
         )
